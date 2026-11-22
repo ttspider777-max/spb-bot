@@ -212,7 +212,13 @@ class Bot(Admin):
             """SELECT COUNT(*) AS orders, COALESCE(SUM(CASE WHEN status='delivered' THEN qty END),0) AS units
                FROM orders WHERE user=?""", user,
         )
-        groups = [("topup", "purchases"), ("stats",), ("referral",), ("promo", "transactions"), ("language",), ("pending",)]
+        groups = [
+            ("topup", "purchases"),
+            ("stats",),
+            ("referral",),
+            ("promo", "transactions"),
+            ("language", "pending"),
+        ]
         rows = [[self.b(user, key, key) for key in group] for group in groups]
         self.say(user, "profile", rows, id=user, main=rub(balance["main"]), referral=rub(balance["referral"]), **dict(counts))
 
@@ -360,9 +366,11 @@ class Bot(Admin):
                     raise ShopError("invalid_invoice")
                 (self.sbp_details if row["method"] == "sbp" else self.invoice)(user, row)
         elif key == "links":
-            rows = [[self.b(user, "support", "support")],
-                    [self.b(user, "reviews", url=REVIEWS), self.b(user, "rules", "rules")],
-                    [self.b(user, "channel", url=CHANNEL)]]
+            rows = [
+                [self.b(user, "support", "support"), self.b(user, "reviews", url=REVIEWS)],
+                [self.b(user, "rules", "rules")],
+                [self.b(user, "channel", url=CHANNEL)],
+            ]
             self.say(user, "links", rows)
         elif key == "rules":
             self.say(user, "rules", back="links")
