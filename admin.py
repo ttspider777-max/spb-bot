@@ -4,7 +4,8 @@ from decimal import Decimal, InvalidOperation
 from html import escape
 from urllib.parse import urlsplit
 
-from copybook import BUTTON, TEXT, fields, rub
+from copybook import rub
+from design import Design
 from store import ShopError
 
 MENU = [
@@ -14,13 +15,6 @@ MENU = [
     [("subs", "Обязательная подписка")],
     [("design", "Тексты, кнопки и приветствие")],
     [("dm", "Написать от имени бота")],
-]
-EXTRA_BUTTONS = [
-    "category_entry", "product_entry", "quantity_entry", "order_entry", "ticket_entry", "ru", "en",
-    "a_panel", "a_close", "a_approve", "a_reject", "a_retry", "a_refund_auto", "a_new", "a_edit",
-    "a_toggle", "a_photo", "a_remove_photo", "a_card", "a_balance", "a_ban", "a_dmuser",
-    "a_text", "a_button", "a_welcome_photo", "a_welcome_clear", "a_remove", "a_restock", "a_rubprice", "a_receipt",
-    *(f"a_{name}" for row in MENU for name, _ in row),
 ]
 PROMPTS = {
     "category": "Отправьте название категории, до 70 символов. Новая категория создаётся скрытой.",
@@ -40,17 +34,6 @@ PROMPTS = {
     "promo": "Отправьте три поля через пробел: КОД СУММА ЧИСЛО_АКТИВАЦИЙ. Пример: START 25 100.",
     "promooff": "Отправьте код, который нужно отключить.",
     "sub": "Отправьте ID или @username канала и ссылку через пробел. Бот должен быть администратором канала.",
-    "text": (
-        "Отправьте первую строку в формате ru КЛЮЧ или en КЛЮЧ, затем новый текст. "
-        "Значения в фигурных скобках подставляются автоматически. "
-        "Можно использовать форматирование Telegram и вставлять премиум-эмодзи прямо в сообщение. "
-        "Чтобы вернуть исходный текст, введите - на второй строке."
-    ),
-    "button": (
-        "Отправьте 4 строки: язык и ключ через пробел, затем подпись, стиль и ID премиум-эмодзи.\n"
-        "Стили: primary (синий), success (зелёный), danger (красный), default (цвет темы).\n"
-        "Поставьте - для исходной подписи или чтобы убрать эмодзи. Отправьте только язык и ключ, чтобы сбросить настройку."
-    ),
     "approve": "Отправьте текст выдачи для покупателя. Он увидит его в заказе и получит уведомление.",
     "reject": "Укажите причину отклонения. Бот вернёт Stars покупателю и восстановит доступный остаток.",
     "reject_sbp": "Укажите причину отклонения чека. Если деньги поступили и их нужно вернуть, оформите возврат в банке. Бот сообщит покупателю об отклонении.",
@@ -77,7 +60,20 @@ def number(raw, least, most):
     return value
 
 
-class Admin:
+class Admin(Design):
+    @staticmethod
+    def design_admin_buttons():
+        return {f"a_{key}": label for row in MENU for key, label in row}
+
+    @staticmethod
+    def design_admin_texts():
+        screens = {
+            "main": "Главный экран админки", "design": "Экран оформления", "subscriptions": "Экран подписки",
+            "categories": "Список категорий", "products": "Список товаров", "users": "Список пользователей",
+            "orders": "Список заказов", "tickets": "Список тикетов", "send_failure": "Ошибка отправки сообщения",
+        }
+        return {**screens, **{f"prompt_{key}": text.splitlines()[0][:62] for key, text in PROMPTS.items()}}
+
     def ad_button(self, key, label, action, **options):
         return self.b(self.admin, "a_" + key, action, label=label, **options)
 
@@ -202,19 +198,18 @@ class Admin:
                 self.s.run("DELETE FROM subscriptions WHERE chat=?", rest[0])
             self.admin_route(["subs"])
         elif action == "design":
-            rows = [[self.ad_button(key, label, action)] for key, label, action in [
-                ("text", "Редактировать тексты", "a:text"), ("button", "Оформить кнопки", "a:button"),
-                ("welcome_photo", "Фото приветствия", "a:welcome_photo"),
-                ("welcome_clear", "Удалить фото приветствия", "a:welcome_clear"),
-            ]]
+            rows = [
+                [self.ad_button("text", "Тексты бота", "a:text"),
+                 self.ad_button("button", "Кнопки бота", "a:button")],
+                [self.design_button("Текст приветствия", "a:d:text:ru:shop:home")],
+                [self.ad_button("welcome_photo", "Фото приветствия", "a:welcome_photo")],
+                [self.ad_button("welcome_clear", "Удалить фото приветствия", "a:welcome_clear")],
+            ]
             self.ad_text("Тексты, кнопки и приветствие", rows, key="design")
         elif action in {"text", "button"}:
-            keys = (sorted(TEXT) + ["admin.main", "admin.design", "admin.subscriptions", "admin.categories",
-                                    "admin.products", "admin.users", "admin.orders", "admin.tickets", "admin.send_failure"]
-                    + [f"admin.prompt_{k}" for k in PROMPTS] if action == "text" else
-                    sorted(set(BUTTON) | set(EXTRA_BUTTONS)))
-            self.ad_text("Ключи\n<code>" + escape(" · ".join(keys)) + "</code>", back="a:design")
-            self.ad_prompt(action, back="a:design")
+            self.design_screen([action, "ru"])
+        elif action == "d":
+            self.design_screen(rest)
         elif action == "welcome_photo":
             self.ad_prompt(action, back="a:design")
         elif action == "welcome_clear":
@@ -319,6 +314,14 @@ class Admin:
     def admin_input(self, action, args, msg):
         user = self.admin
         body = (msg.get("text") or msg.get("caption") or "").strip()
+        if action in {"design_text", "design_label", "design_emoji"}:
+            self.design_input(action, args, msg)
+            return
+        if action in {"text", "button"}:
+            with self.s.db:
+                self.s.state(user)
+            self.design_screen([action, "ru"])
+            return
         if action == "ticketreply":
             self.ticket_message(user, msg, args[0], admin=True)
             return
@@ -381,10 +384,6 @@ class Admin:
                 self.s.run("UPDATE promos SET remaining=0 WHERE code=?", body.upper())
             elif action == "sub":
                 self.save_subscription(body)
-            elif action == "text":
-                self.save_text(body, msg)
-            elif action == "button":
-                self.save_button(body, msg)
             elif action in {"approve", "reject", "reject_sbp"}:
                 if not 1 <= len(body) <= (2500 if action == "approve" else 250):
                     raise ShopError("invalid")
@@ -461,75 +460,3 @@ class Admin:
         if member["status"] != "administrator":
             raise ShopError("invalid")
         self.s.run("INSERT OR REPLACE INTO subscriptions VALUES(?,?)", str(info["id"]), link)
-
-    @staticmethod
-    def emoji_entities(msg):
-        return [e for e in msg.get("entities", msg.get("caption_entities", [])) if e["type"] == "custom_emoji"]
-
-    def save_text(self, body, msg):
-        header, sep, text = body.partition("\n")
-        heading = header.split()
-        if not sep or len(heading) != 2 or heading[0] not in {"ru", "en"} or not 1 <= len(text) <= 3500:
-            raise ShopError("invalid")
-        lang, key = heading
-        if key.startswith("admin.") and (key in {"admin.main", "admin.design", "admin.subscriptions", "admin.categories",
-                                                  "admin.products", "admin.users", "admin.orders", "admin.tickets", "admin.send_failure"}
-                                         or key.removeprefix("admin.prompt_") in PROMPTS):
-            target = f"admin_text:{key[6:]}"
-            allowed = set()
-        elif key in TEXT:
-            target = f"text:{lang}:{key}"
-            allowed = fields(TEXT[key][lang == "en"])
-        else:
-            raise ShopError("invalid")
-        try:
-            if not fields(text) <= allowed:
-                raise ShopError("invalid")
-        except ValueError:
-            raise ShopError("invalid") from None
-        if text == "-":
-            self.s.run("DELETE FROM settings WHERE key=?", target)
-            return
-        original = msg.get("text") or msg.get("caption") or ""
-        offset = len((original[:original.find("\n") + 1]).encode("utf-16-le"))
-        encoded = text.encode("utf-16-le")
-        for entity in sorted(self.emoji_entities(msg), key=lambda e: e["offset"], reverse=True):
-            start = entity["offset"] * 2 - offset
-            end = start + entity["length"] * 2
-            if 0 <= start < end <= len(encoded):
-                fallback = escape(encoded[start:end].decode("utf-16-le"))
-                tag = f"<tg-emoji emoji-id=\"{entity['custom_emoji_id']}\">{fallback}</tg-emoji>"
-                encoded = encoded[:start] + tag.encode("utf-16-le") + encoded[end:]
-        self.s.put(target, encoded.decode("utf-16-le"))
-
-    def save_button(self, body, msg):
-        lines = body.split("\n")
-        header = lines[0].split()
-        if len(header) != 2 or header[0] not in {"ru", "en"} or header[1] not in set(BUTTON) | set(EXTRA_BUTTONS):
-            raise ShopError("invalid")
-        lang, key = header
-        target = f"button:{lang}:{key}"
-        if len(lines) == 1:
-            self.s.run("DELETE FROM settings WHERE key=?", target)
-            return
-        if len(lines) != 4:
-            raise ShopError("invalid")
-        _, label, style, icon = [s.strip() for s in lines]
-        if style not in {"primary", "success", "danger", "default"} or not 1 <= len(label) <= 60:
-            raise ShopError("invalid")
-        try:
-            if not fields(label) <= fields(BUTTON.get(key, ("", ""))[lang == "en"]):
-                raise ShopError("invalid")
-        except ValueError:
-            raise ShopError("invalid") from None
-        if icon == "-":
-            icon = None
-        elif not re.fullmatch(r"[0-9]{1,22}", icon):
-            items = self.emoji_entities(msg)
-            if not items:
-                raise ShopError("invalid")
-            icon = items[-1]["custom_emoji_id"]
-        value = {"style": None if style == "default" else style, "icon": icon}
-        if label != "-":
-            value["label"] = label
-        self.s.put(target, value)

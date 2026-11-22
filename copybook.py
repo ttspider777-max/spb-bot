@@ -1,5 +1,4 @@
 from html import escape
-from string import Formatter
 
 TEXT = {
     "home": ("Здравствуйте, {name}! Выберите раздел магазина.", "Hi, {name}! Choose a section."),
@@ -139,16 +138,6 @@ BUTTON = {
 }
 
 
-def fields(template):
-    names = set()
-    for _, key, spec, convert in Formatter().parse(template):
-        if key is not None:
-            if not key.isidentifier() or spec or convert:
-                raise ValueError("Invalid placeholder")
-            names.add(key)
-    return names
-
-
 def rub(amount):
     sign = "−" if amount < 0 else ""
     amount = abs(amount)
@@ -169,11 +158,14 @@ class Copybook:
         return template.format(**{k: escape(str(v)) for k, v in values.items()})
 
     def button(self, user, key, callback=None, url=None, label=None, style=None, **values):
-        lang = self.lang(user)
+        return self.button_for(self.lang(user), key, callback, url, label, style, **values)
+
+    def button_for(self, lang, key, callback=None, url=None, label=None, style=None, **values):
         default = label or BUTTON.get(key, (key, key))[lang == "en"]
         config = self.store.get(f"button:{lang}:{key}", {})
         template = config.get("label")
         text = template.format(**values) if template is not None else default if label is not None else default.format(**values)
+        text = " ".join(filter(None, (config.get("accent"), config.get("emoji"), config.get("prefix"), text)))
         button = {"text": text, "url": url} if url else {"text": text, "callback_data": callback}
         if config.get("style", style):
             button["style"] = config.get("style", style)
