@@ -95,7 +95,10 @@ class Bot(Admin):
         return not missing
 
     def home(self, user):
-        rows = [[self.b(user, key, key)] for key in ("catalog", "links", "profile")]
+        rows = [
+            [self.b(user, "catalog", "catalog"), self.b(user, "links", "links")],
+            [self.b(user, "profile", "profile")],
+        ]
         name = self.s.one("SELECT name FROM users WHERE id=?", user)["name"]
         self.say(user, "home", rows, photo=self.s.get("welcome_photo"), home=False, name=name)
 
@@ -149,8 +152,9 @@ class Bot(Admin):
         with self.s.db:
             self.s.state(user, "quantity", product)
         options = [n for n in (1, 2, 5, 10) if n <= limit]
-        self.say(user, "quantity", [[self.b(user, "quantity_entry", f"quote:{product}:{n}", label=str(n))
-                                     for n in options]], f"item:{product}", max=limit)
+        buttons = [self.b(user, "quantity_entry", f"quote:{product}:{n}", label=str(n)) for n in options]
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+        self.say(user, "quantity", rows, f"item:{product}", max=limit)
 
     def quote(self, user, product, qty):
         item = self.item(product)

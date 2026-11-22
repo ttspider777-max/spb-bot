@@ -8,17 +8,19 @@ from copybook import BUTTON, TEXT, fields, rub
 from store import ShopError
 
 MENU = [
-    ("categories", "Категории"), ("products", "Товары"), ("users", "Пользователи"),
-    ("orders", "Заказы"), ("tickets", "Тикеты"), ("promos", "Промокоды"),
-    ("subs", "Обязательная подписка"), ("design", "Тексты, кнопки и приветствие"),
-    ("dm", "Написать от имени бота"),
+    [("categories", "Категории"), ("products", "Товары")],
+    [("users", "Пользователи"), ("orders", "Заказы")],
+    [("tickets", "Тикеты"), ("promos", "Промокоды")],
+    [("subs", "Обязательная подписка")],
+    [("design", "Тексты, кнопки и приветствие")],
+    [("dm", "Написать от имени бота")],
 ]
 EXTRA_BUTTONS = [
     "category_entry", "product_entry", "quantity_entry", "order_entry", "ticket_entry", "ru", "en",
     "a_panel", "a_close", "a_approve", "a_reject", "a_retry", "a_refund_auto", "a_new", "a_edit",
     "a_toggle", "a_photo", "a_remove_photo", "a_card", "a_balance", "a_ban", "a_dmuser",
     "a_text", "a_button", "a_welcome_photo", "a_welcome_clear", "a_remove", "a_restock", "a_rubprice", "a_receipt",
-    *(f"a_{name}" for name, _ in MENU),
+    *(f"a_{name}" for row in MENU for name, _ in row),
 ]
 PROMPTS = {
     "category": "Отправьте название категории, до 70 символов. Новая категория создаётся скрытой.",
@@ -97,7 +99,7 @@ class Admin:
         action = args[0] if args else "main"
         rest = args[1:]
         if action == "main":
-            rows = [[self.ad_button(name, label, f"a:{name}")] for name, label in MENU]
+            rows = [[self.ad_button(name, label, f"a:{name}") for name, label in row] for row in MENU]
             self.ad_text("Админ-панель", rows, None, "main")
         elif action in {"categories", "products", "users", "orders", "tickets"}:
             self.ad_list(action, int(rest[0]) if rest else 0)
