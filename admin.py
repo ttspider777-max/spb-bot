@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 from copybook import rub
 from design import Design
+from product_wizard import ProductWizard
 from store import ShopError
 
 MENU = [
@@ -18,13 +19,7 @@ MENU = [
 ]
 PROMPTS = {
     "category": "Отправьте название категории, до 70 символов. Новая категория создаётся скрытой.",
-    "product": (
-        "Отправьте 7 строк:\n"
-        "1. ID категории\n2. Название\n3. Цена за единицу в Stars (целое число)\n"
-        "4. Остаток\n5. Режим: manual, text или invite\n6. Описание\n"
-        "7. Для manual поставьте -, для text укажите текст автовыдачи, для invite укажите ID чата (-100…).\n\n"
-        "Новый товар создаётся скрытым. В режиме invite покупка оформляется на одного пользователя."
-    ),
+    "product": "Добавьте товар по шагам через раздел «Товары» → «Создать товар».",
     "restock": "Отправьте новый доступный остаток. Зарезервированный товар уже вычтен из него.",
     "rubprice": "Отправьте цену за единицу в рублях, например 1,32. Отправьте - для расчёта по 1,32 ₽ за каждую ⭐ цены.",
     "photo": "Отправьте фото обычным сообщением Telegram.",
@@ -60,7 +55,7 @@ def number(raw, least, most):
     return value
 
 
-class Admin(Design):
+class Admin(ProductWizard, Design):
     @staticmethod
     def design_admin_buttons():
         return {f"a_{key}": label for row in MENU for key, label in row}
@@ -109,7 +104,11 @@ class Admin(Design):
                 self.ticket_view(user, key, admin=True)
             else:
                 self.ad_card(action, key)
-        elif action in {"newcat", "editcat", "newprod", "editprod", "restock", "photo", "rubprice"}:
+        elif action in {"newprod", "editprod"}:
+            self.product_start(int(rest[0]) if action == "editprod" else None)
+        elif action == "w":
+            self.product_action(rest)
+        elif action in {"newcat", "editcat", "restock", "photo", "rubprice"}:
             target = int(rest[0]) if rest else None
             form = {"newcat": "category", "editcat": "category", "newprod": "product", "editprod": "product"}.get(action, action)
             is_category = form == "category"
@@ -328,6 +327,9 @@ class Admin(Design):
     def admin_input(self, action, args, msg):
         user = self.admin
         body = (msg.get("text") or msg.get("caption") or "").strip()
+        if action == "product_step":
+            self.product_input(args, msg)
+            return
         if action in {"design_text", "design_label", "design_emoji", "design_auto"}:
             self.design_input(action, args, msg)
             return
