@@ -13,7 +13,7 @@ MENU = [
     [("users", "Пользователи"), ("orders", "Заказы")],
     [("tickets", "Тикеты"), ("promos", "Промокоды")],
     [("subs", "Обязательная подписка")],
-    [("design", "Тексты, кнопки и приветствие")],
+    [("design", "Оформление бота")],
     [("dm", "Написать от имени бота")],
 ]
 PROMPTS = {
@@ -80,10 +80,14 @@ class Admin(Design):
     def ad_text(self, text, rows=(), back="a", key=None):
         if key:
             text = self.s.get(f"admin_text:{key}", text)
+        navigation = []
         if back and back != "a":
-            rows = [*rows, [self.b(self.admin, "back", back)]]
-        rows = [*rows, [self.ad_button("panel", "‹ Админ-панель", "a")]] if back else rows
-        self.send(self.admin, text, rows)
+            navigation.append(self.b(self.admin, "back", back))
+        if back:
+            navigation.append(self.ad_button("panel", "Админ-панель", "a"))
+        if navigation:
+            rows = [*rows, navigation]
+        self.send(self.admin, text, rows, home=False)
 
     def ad_prompt(self, action, args=(), back="a"):
         with self.s.db:
@@ -198,16 +202,26 @@ class Admin(Design):
                 self.s.run("DELETE FROM subscriptions WHERE chat=?", rest[0])
             self.admin_route(["subs"])
         elif action == "design":
+            lang = rest[0] if rest and rest[0] in {"ru", "en"} else self.s.get("design_lang", "ru")
+            with self.s.db:
+                self.s.put("design_lang", lang)
+            button = self.design_button
+            base = f"a:d:button:{lang}"
             rows = [
-                [self.ad_button("text", "Тексты бота", "a:text"),
-                 self.ad_button("button", "Кнопки бота", "a:button")],
-                [self.design_button("Текст приветствия", "a:d:text:ru:shop:home")],
-                [self.ad_button("welcome_photo", "Фото приветствия", "a:welcome_photo")],
-                [self.ad_button("welcome_clear", "Удалить фото приветствия", "a:welcome_clear")],
+                [button("Приветствие", f"a:d:text:{lang}:shop:home"),
+                 button("Фото приветствия", "a:welcome_photo")],
+                [button("Каталог", f"{base}:shop:catalog"), button("Профиль", f"{base}:shop:profile")],
+                [button("Полезные ссылки", f"{base}:shop:links"), button("Поддержка", f"{base}:shop:support")],
+                [button("Все кнопки", f"a:d:button:{lang}"), button("Все тексты", f"a:d:text:{lang}")],
+                [button("Язык: Русский ✓" if lang == "ru" else "Русский", "a:design:ru"),
+                 button("English ✓" if lang == "en" else "English", "a:design:en")],
             ]
-            self.ad_text("Тексты, кнопки и приветствие", rows, key="design")
+            if self.s.get("welcome_photo"):
+                rows.insert(1, [button("Убрать фото приветствия", "a:welcome_clear")])
+            self.ad_text("<b>Оформление бота</b>\nВыберите, что изменить.\n"
+                         "В редакторе кнопки просто отправьте надпись или эмодзи. Цвета доступны сразу.", rows, key="design")
         elif action in {"text", "button"}:
-            self.design_screen([action, "ru"])
+            self.design_screen([action, self.s.get("design_lang", "ru")])
         elif action == "d":
             self.design_screen(rest)
         elif action == "welcome_photo":
@@ -314,13 +328,13 @@ class Admin(Design):
     def admin_input(self, action, args, msg):
         user = self.admin
         body = (msg.get("text") or msg.get("caption") or "").strip()
-        if action in {"design_text", "design_label", "design_emoji"}:
+        if action in {"design_text", "design_label", "design_emoji", "design_auto"}:
             self.design_input(action, args, msg)
             return
         if action in {"text", "button"}:
             with self.s.db:
                 self.s.state(user)
-            self.design_screen([action, "ru"])
+            self.design_screen([action, self.s.get("design_lang", "ru")])
             return
         if action == "ticketreply":
             self.ticket_message(user, msg, args[0], admin=True)

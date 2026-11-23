@@ -1,4 +1,5 @@
 from html import escape
+import re
 
 TEXT = {
     "home": ("Здравствуйте, {name}! Выберите раздел магазина.", "Hi, {name}! Choose a section."),
@@ -144,6 +145,23 @@ def rub(amount):
     return f"{sign}{amount // 100},{amount % 100:02d} ₽"
 
 
+# Strip decorative leading emoji only: keep prices, currencies and navigation text.
+_LEADING_EMOJI = re.compile(
+    r"^(?:[0-9#*]\ufe0f?\u20e3|[\U0001f000-\U0001faff\u2600-\u27bf\u2300-\u23ff]"
+    r"[\ufe0e\ufe0f\U0001f3fb-\U0001f3ff]*(?:\u200d[\U0001f000-\U0001faff\u2600-\u27bf]"
+    r"[\ufe0e\ufe0f\U0001f3fb-\U0001f3ff]*)*)\s*"
+)
+
+
+def without_button_emoji(text):
+    result = text.lstrip()
+    while True:
+        cleaned = _LEADING_EMOJI.sub("", result, count=1)
+        if cleaned == result:
+            return result
+        result = cleaned
+
+
 class Copybook:
     def __init__(self, store):
         self.store = store
@@ -165,7 +183,15 @@ class Copybook:
         config = self.store.get(f"button:{lang}:{key}", {})
         template = config.get("label")
         text = template.format(**values) if template is not None else default if label is not None else default.format(**values)
-        text = " ".join(filter(None, (config.get("accent"), config.get("emoji"), config.get("prefix"), text)))
+        prefix = config.get("prefix", "")
+        replacing_icon = bool(config.get("icon")) or "emoji" in config or bool(config.get("accent"))
+        if replacing_icon:
+            text = without_button_emoji(text) or text
+            prefix = without_button_emoji(prefix)
+        # A premium icon is the sole decorative icon, including for older saved settings.
+        accent = None if config.get("icon") else config.get("accent")
+        emoji = None if config.get("icon") else config.get("emoji")
+        text = " ".join(filter(None, (accent, emoji, prefix, text)))
         button = {"text": text, "url": url} if url else {"text": text, "callback_data": callback}
         if config.get("style", style):
             button["style"] = config.get("style", style)

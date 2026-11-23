@@ -1,3 +1,4 @@
+import re
 from html import escape
 from string import Formatter
 from unicodedata import category
@@ -165,6 +166,10 @@ class Design:
             button["style"] = style
         return button
 
+    @staticmethod
+    def design_rows(buttons, columns=2):
+        return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
+
     def design_screen(self, args, saved=False):
         kind, lang, *rest = args
         if kind not in {"text", "button"} or lang not in {"ru", "en"}:
@@ -173,20 +178,30 @@ class Design:
         base = f"a:d:{kind}:{lang}"
         button = self.design_button
         if not rest:
-            rows = [[button(title, f"{base}:{group}")] for group, (title, _) in groups.items()]
+            rows = self.design_rows([button(title, f"{base}:{group}") for group, (title, _) in groups.items()])
             other = "en" if lang == "ru" else "ru"
-            rows.append([button("Редактировать английскую версию" if other == "en" else "Редактировать русскую версию",
-                                f"a:d:{kind}:{other}")])
-            self.ad_text("Выберите раздел", rows, "a:design")
+            rows.append([button("English" if other == "en" else "Русский", f"a:d:{kind}:{other}")])
+            self.ad_text("<b>Кнопки бота</b>" if kind == "button" else "<b>Тексты бота</b>", rows, "a:design")
             return
         group, *rest = rest
         if group not in groups:
             raise ShopError("invalid")
         title, entries = groups[group]
         section = f"{base}:{group}"
-        if not rest:
-            rows = [[button(label, f"{section}:{key}")] for key, label in entries.items()]
-            self.ad_text(escape(title), rows, base)
+        if not rest or re.fullmatch(r"p[0-9]+", rest[0]):
+            page = int(rest[0][1:]) if rest else 0
+            items = list(entries.items())
+            if page * 8 >= len(items):
+                raise ShopError("invalid")
+            rows = self.design_rows([button(label, f"{section}:{key}") for key, label in items[page * 8:page * 8 + 8]])
+            pages = []
+            if page:
+                pages.append(button("‹ Предыдущие", f"{section}:p{page - 1}"))
+            if (page + 1) * 8 < len(items):
+                pages.append(button("Следующие ›", f"{section}:p{page + 1}"))
+            if pages:
+                rows.append(pages)
+            self.ad_text(f"<b>{escape(title)}</b> · {page + 1}/{(len(items) + 7) // 8}", rows, base)
             return
         key, *rest = rest
         if key not in entries:
@@ -195,6 +210,8 @@ class Design:
         location = f"{section}:{key}"
         action = rest[0] if rest else ""
         setting = self.design_setting(kind, lang, group, key)
+        page = list(entries).index(key) // 8
+        back = f"{section}:p{page}"
         if action == "reset":
             with self.s.db:
                 self.s.run("DELETE FROM settings WHERE key=?", setting)
@@ -207,46 +224,56 @@ class Design:
             if key in AUTO_DETAILS and group != "admin":
                 prompt += "\nДанные заказа или раздела бот добавит сам."
             if saved:
-                prompt = "Сохранено.\n\n" + prompt
-            self.ad_text(prompt, [[button("Вернуть исходный текст", f"{location}:reset")]], section)
+                prompt = "Сохранено. Можно отправить новый вариант.\n\n" + prompt
+            rows = [[button("Вернуть исходный текст", f"{location}:reset")]]
+            if key == "home" and group == "shop":
+                rows.insert(0, [button("Фото приветствия", "a:welcome_photo")])
+            self.ad_text(prompt, rows, back)
             return
         config = self.s.get(setting, {})
-        if action in {"color", "color_success", "color_danger", "color_primary", "color_purple", "color_theme"}:
-            if action == "color":
-                rows = [[button(name, f"{location}:color_{color}", style)]
-                        for color, (name, style, _) in COLORS.items()]
-                self.ad_text("Выберите цвет. Для фиолетового доступен значок 🟣.", rows, location)
-                return
-            _, style, accent = COLORS[action.removeprefix("color_")]
+        if action.startswith("color_") and action[6:] in COLORS:
+            _, style, accent = COLORS[action[6:]]
             config.update(style=style, accent=accent)
         elif action == "clear":
             config.pop("icon", None)
-            config.pop("emoji", None)
+            config.pop("accent", None)
+            config["emoji"] = ""
         elif action in {"label", "emoji"}:
             with self.s.db:
                 self.s.state(self.admin, f"a:design_{action}", *args[:4])
-            if action == "label":
-                prompt = "Отправьте новую надпись одним сообщением."
-                if key in DYNAMIC_BUTTONS:
-                    prompt = "Отправьте короткую подпись. Она появится перед названием или номером."
-            else:
-                prompt = "Отправьте один обычный или премиум-эмодзи."
-            rows = [[button("Убрать эмодзи", f"{location}:clear")]] if action == "emoji" else []
-            self.ad_text(prompt, rows, location)
+            prompt = "Отправьте новую надпись." if action == "label" else "Отправьте один обычный или премиум-эмодзи."
+            self.ad_text(prompt, [[button("Без эмодзи", f"{location}:clear")]], location)
             return
-        elif action not in {"", "preview"}:
+        elif action not in {"", "preview", "color"}:
             raise ShopError("invalid")
         if action.startswith("color_") or action == "clear":
             with self.s.db:
                 self.s.put(setting, config)
             saved = True
+        # Opening the editor is enough to start changing the button.
+        with self.s.db:
+            self.s.state(self.admin, "a:design_auto", *args[:4])
         samples = {"amount": "132 ₽" if key.startswith("sbp") else 100, "n": 1}
         preview = self.copy.button_for(lang, key, f"{location}:preview",
                                        label=None if key in BUTTON else label, **samples)
-        rows = [[preview], [button("Цвет", f"{location}:color"), button("Надпись", f"{location}:label")],
-                [button("Эмодзи", f"{location}:emoji")], [button("Сбросить оформление", f"{location}:reset")]]
-        title = f"<b>{escape(label)}</b>\nПервая кнопка показывает результат."
-        self.ad_text(("Сохранено.\n\n" if saved else "") + title, rows, section)
+        colors = [button(name, f"{location}:color_{color}", style) for color, (name, style, _) in COLORS.items()]
+        rows = [[preview], *self.design_rows(colors, 3),
+                [button("Без эмодзи", f"{location}:clear"), button("Сбросить", f"{location}:reset")]]
+        keys = list(entries)
+        index = keys.index(key)
+        adjacent = []
+        if index:
+            adjacent.append(button("‹ Предыдущая кнопка", f"{section}:{keys[index - 1]}"))
+        if index + 1 < len(keys):
+            adjacent.append(button("Следующая кнопка ›", f"{section}:{keys[index + 1]}"))
+        if adjacent:
+            rows.append(adjacent)
+        title = (f"<b>{escape(label)}</b>\nПервая кнопка — предпросмотр.\n"
+                 "Отправьте новую надпись или один эмодзи. Можно отправить премиум-эмодзи вместе с надписью.\n"
+                 "Цвет меняется нажатием ниже. Премиум-эмодзи заменяет обычный значок.")
+        if key in DYNAMIC_BUTTONS:
+            title += "\nНадпись будет префиксом перед названием или номером."
+        self.ad_text(("Сохранено.\n\n" if saved else "") + title, rows, back)
 
     @staticmethod
     def design_setting(kind, lang, group, key):
@@ -277,32 +304,45 @@ class Design:
                 self.s.put(setting, html)
             else:
                 config = self.s.get(setting, {})
-                if action == "design_label":
-                    if len(text) > 45 or "\n" in text:
+                icons = [e for e in entities if e["type"] == "custom_emoji"]
+                ordinary = (len(text) <= 12 and any(category(c) == "So" or c == "\u20e3" for c in text) and all(
+                    category(c) in {"So", "Sk", "Mn", "Cf", "Me"} or c in "0123456789#*" for c in text))
+                if action == "design_auto":
+                    action = "design_emoji" if icons or ordinary else "design_label"
+                label_text = text if action == "design_label" else None
+                if action == "design_emoji":
+                    if len(icons) == 1:
+                        entity = icons[0]
+                        data = raw.encode("utf-16-le")
+                        start = entity["offset"] * 2
+                        end = start + entity["length"] * 2
+                        if not 0 <= start < end <= len(data) or not entity.get("custom_emoji_id"):
+                            raise ShopError("invalid")
+                        try:
+                            remainder = (data[:start] + data[end:]).decode("utf-16-le").strip()
+                        except UnicodeDecodeError:
+                            raise ShopError("invalid") from None
+                        if remainder:
+                            label_text = remainder
+                        config["icon"] = entity["custom_emoji_id"]
+                        config.pop("emoji", None)
+                        config.pop("accent", None)
+                    elif not icons and ordinary:
+                        config["emoji"] = text
+                        config.pop("icon", None)
+                        config.pop("accent", None)
+                    else:
+                        raise ShopError("invalid")
+                if label_text is not None:
+                    if len(label_text) > 45 or "\n" in label_text:
                         raise ShopError("invalid")
                     if key in DYNAMIC_BUTTONS:
                         config.pop("label", None)
-                        config["prefix"] = text
+                        config["prefix"] = label_text
                     else:
                         default = BUTTON.get(key, ("", ""))[lang == "en"]
                         suffix = [name for _, name, _, _ in Formatter().parse(default) if name]
-                        config["label"] = template_literal(text) + "".join(" · {" + name + "}" for name in suffix)
-                elif action == "design_emoji":
-                    icons = [i["custom_emoji_id"] for i in entities if i["type"] == "custom_emoji"]
-                    if len(icons) == 1 and entities and len(text) <= 12 and not any(c.isspace() for c in text):
-                        config["icon"] = icons[0]
-                        config.pop("emoji", None)
-                    elif not icons and len(text) <= 12 and any(category(c) == "So" or c == "\u20e3" for c in text) and all(
-                        category(c) in {"So", "Sk", "Mn", "Cf", "Me"} or c in "0123456789#*" for c in text
-                    ):
-                        config["emoji"] = text
-                        config.pop("icon", None)
-                    else:
-                        raise ShopError("invalid")
+                        config["label"] = template_literal(label_text) + "".join(" · {" + name + "}" for name in suffix)
                 self.s.put(setting, config)
             self.s.state(self.admin)
-        if action == "design_text":
-            section = f"a:d:{kind}:{lang}:{group}"
-            self.ad_text("Текст сохранён.", [[self.design_button("Выбрать другой текст", section)]], section)
-        else:
-            self.design_screen(args, saved=True)
+        self.design_screen(args, saved=True)
