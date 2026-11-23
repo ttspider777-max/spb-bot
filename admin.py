@@ -8,6 +8,7 @@ from copybook import rub
 from design import Design
 from product_wizard import ProductWizard
 from store import ShopError
+from titles import read_title, title_html
 
 MENU = [
     [("categories", "Категории"), ("products", "Товары")],
@@ -18,7 +19,7 @@ MENU = [
     [("dm", "Написать от имени бота")],
 ]
 PROMPTS = {
-    "category": "Отправьте название категории, до 70 символов. Новая категория создаётся скрытой.",
+    "category": "Отправьте название категории, до 70 символов. Можно добавить премиум-эмодзи. Новая категория сразу видна в каталоге.",
     "product": "Добавьте товар по шагам через раздел «Товары» → «Создать товар».",
     "restock": "Отправьте новый доступный остаток. Зарезервированный товар уже вычтен из него.",
     "rubprice": "Отправьте цену за единицу в рублях, например 1,32. Отправьте - для расчёта по 1,32 ₽ за каждую ⭐ цены.",
@@ -114,6 +115,11 @@ class Admin(ProductWizard, Design):
             is_category = form == "category"
             back = f"a:{'cat' if is_category else 'product'}:{target}" if target else f"a:{'categories' if is_category else 'products'}"
             self.ad_prompt(form, (target,), back)
+        elif action == "publishcat":
+            key = int(rest[0])
+            with self.s.db:
+                self.s.run("UPDATE categories SET active=1 WHERE id=?", key)
+            self.ad_list("categories", 0)
         elif action in {"togglecat", "toggleprod", "clearphoto"}:
             key = int(rest[0])
             table = "categories" if action == "togglecat" else "products"
@@ -255,7 +261,15 @@ class Admin(ProductWizard, Design):
                 label = f"№{key} · {unescape(self.t(self.admin, 'status_' + row['status']))}"[:64]
             else:
                 label = f"№{key} · {row['title']}"[:64]
-            buttons.append([self.ad_button("card", label, f"a:{callback}:{key}")])
+            if table in {"categories", "products"}:
+                entry = self.copy.named_button(self.admin, "a_card", f"a:{callback}:{key}", row,
+                                               prefix=f"№{key} · ")
+                line = [entry]
+                if table == "categories" and not row["active"]:
+                    line.append(self.design_button("Показать", f"a:publishcat:{key}", "success"))
+                buttons.append(line)
+            else:
+                buttons.append([self.ad_button("card", label, f"a:{callback}:{key}")])
         self.pages(self.admin, buttons, f"a:{action}", page, len(rows) > 12)
         self.ad_text(title, buttons, key=action)
 
@@ -266,11 +280,11 @@ class Admin(ProductWizard, Design):
             raise ShopError("unavailable")
         btn = self.ad_button
         if kind == "cat":
-            text = f"Категория №{key} · {escape(row['title'])}\n{'Опубликована' if row['active'] else 'Скрыта'}"
+            text = f"Категория №{key} · {title_html(row)}\n{'Опубликована' if row['active'] else 'Скрыта'}"
             buttons = [[btn("edit", "Переименовать", f"a:editcat:{key}")],
                        [btn("toggle", "Скрыть" if row["active"] else "Опубликовать", f"a:togglecat:{key}")]]
         elif kind == "product":
-            text = (f"Товар №{key} · {escape(row['title'])}\nКатегория №{row['category']}\n"
+            text = (f"Товар №{key} · {title_html(row)}\nКатегория №{row['category']}\n"
                     f"{escape(row['description'])}\nЦена · {row['price']} ⭐ или {rub(self.s.unit_price(row, 'sbp'))} по СБП\nОстаток · {row['stock']}\n"
                     f"Выдача · {row['mode']}\n{'Опубликован' if row['active'] else 'Скрыт'}")
             buttons = [
@@ -298,7 +312,7 @@ class Admin(ProductWizard, Design):
             sbp = row["method"] == "sbp"
             status = self.t(self.admin, "sbp_status_review" if sbp and row["status"] == "review" else f"status_{row['status']}")
             amount = f"{rub(row['total'])} по СБП" if sbp else f"{row['total']} ⭐"
-            text = (f"Заказ №{key}\n{escape(row['title'])} × {row['qty']}\n"
+            text = (f"Заказ №{key}\n{title_html(row)} × {row['qty']}\n"
                     f"Покупатель · <code>{row['user']}</code>\nК оплате · {amount}\nСтатус · {status}")
             buttons = []
             if row["status"] == "review":
@@ -356,12 +370,15 @@ class Admin(ProductWizard, Design):
             raise ShopError("invalid")
         with self.s.db:
             if action == "category":
-                if not 1 <= len(body) <= 70:
-                    raise ShopError("invalid")
+                title, entities = read_title(msg)
                 if args[0]:
-                    self.s.run("UPDATE categories SET title=? WHERE id=?", body, args[0])
+                    self.s.run("UPDATE categories SET title=?,title_entities=? WHERE id=?", title, entities, args[0])
                 else:
-                    self.s.run("INSERT INTO categories(title) VALUES(?)", body)
+                    cursor = self.s.run("INSERT INTO categories(title,title_entities,active) VALUES(?,?,1)", title, entities)
+                    args = (cursor.lastrowid,)
+                self.s.state(user)
+                self.ad_card("cat", args[0])
+                return
             elif action == "product":
                 self.save_product(args[0], body)
             elif action == "restock":
@@ -452,7 +469,7 @@ class Admin(ProductWizard, Design):
         if product:
             self.s.run(
                 """UPDATE products SET category=?,title=?,description=?,price=?,stock=?,mode=?,target=?,
-                   revision=revision+1 WHERE id=?""", *values, product,
+                   revision=revision+1,title_entities='[]' WHERE id=?""", *values, product,
             )
         else:
             self.s.run(

@@ -1,5 +1,6 @@
 from html import escape
 import re
+from titles import TitleHTML, button_title
 
 TEXT = {
     "home": ("Здравствуйте, {name}! Выберите раздел магазина.", "Hi, {name}! Choose a section."),
@@ -173,14 +174,21 @@ class Copybook:
         lang = self.lang(user)
         default = TEXT[key][lang == "en"]
         template = self.store.get(f"text:{lang}:{key}", default)
-        return template.format(**{k: escape(str(v)) for k, v in values.items()})
+        return template.format(**{k: (str(v) if isinstance(v, TitleHTML) else escape(str(v))) for k, v in values.items()})
 
-    def button(self, user, key, callback=None, url=None, label=None, style=None, **values):
-        return self.button_for(self.lang(user), key, callback, url, label, style, **values)
+    def button(self, user, key, callback=None, url=None, label=None, style=None, item_icon=None, **values):
+        return self.button_for(self.lang(user), key, callback, url, label, style, item_icon=item_icon, **values)
 
-    def button_for(self, lang, key, callback=None, url=None, label=None, style=None, **values):
+    def named_button(self, user, key, callback, row, prefix="", suffix=""):
+        text, icon = button_title(row)
+        return self.button(user, key, callback, label=prefix + text + suffix, item_icon=icon)
+
+    def button_for(self, lang, key, callback=None, url=None, label=None, style=None, item_icon=None, **values):
         default = label or BUTTON.get(key, (key, key))[lang == "en"]
         config = self.store.get(f"button:{lang}:{key}", {})
+        # A name's own icon wins over generic list-button decoration.
+        if item_icon:
+            config = {**config, "icon": item_icon}
         template = config.get("label")
         text = template.format(**values) if template is not None else default if label is not None else default.format(**values)
         prefix = config.get("prefix", "")

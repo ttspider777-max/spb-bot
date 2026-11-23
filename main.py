@@ -5,6 +5,8 @@ import logging
 import os
 import re
 import time
+import threading
+from contextlib import nullcontext
 from pathlib import Path
 
 from bot import Bot
@@ -27,10 +29,12 @@ class Worker:
         current = int(time.time())
         job = self.s.one("SELECT * FROM jobs WHERE due<=? ORDER BY due,rowid LIMIT 1", current)
         if not job:
-            return
+            return False
         options = json.loads(job["data"])
         try:
-            self.process(job["kind"], **options)
+            lock = self.bot.order_lock(options["order"]) if "order" in options else nullcontext()
+            with lock:
+                self.process(job["kind"], **options)
         except TelegramError as error:
             tries = job["failures"] + 1
             if error.code in {400, 403} and job["kind"] in {
@@ -48,9 +52,10 @@ class Worker:
                     if job["kind"] == "deliver" and tries == 1:
                         self.s.enqueue(f"delivery_error:{options['order']}", "review", order=options["order"])
                 LOG.warning("Queued %s for another attempt (%s)", job["key"], error.code)
-                return
+                return True
         with self.s.db:
             self.s.run("DELETE FROM jobs WHERE key=?", job["key"])
+        return True
 
     def process(self, kind, **data):
         bot = self.bot
@@ -144,35 +149,76 @@ class Worker:
             self.s.enqueue(f"delivered_notice:{order}", "delivered_notice", order=order)
 
 
+def background_jobs(api, database, admin, username, stop, wake, order_locks=None):
+    # SQLite connections and Bot state are owned by one thread each.
+    store = Store(database)
+    bot = Bot(api, store, admin, order_locks=order_locks)
+    bot.username = username
+    worker = Worker(bot)
+    next_expiry = 0
+    try:
+        while not stop.is_set():
+            try:
+                now = time.monotonic()
+                if now >= next_expiry:
+                    with store.db:
+                        store.expired()
+                    next_expiry = now + 1
+                if worker.next():
+                    continue
+            except Exception:
+                LOG.exception("Background task failed; it will be retried")
+                if stop.wait(1):
+                    break
+            wake.wait(0.25)
+            wake.clear()
+    finally:
+        store.db.close()
+        if hasattr(api, "close_thread"):
+            api.close_thread()
+
+
 def poll(bot):
     store, api = bot.s, bot.api
     bot.username = api.call("getMe")["username"]
     LOG.info("Bot @%s is running", bot.username)
-    worker = Worker(bot)
+    database = store.one("PRAGMA database_list")["file"]
+    stop, wake = threading.Event(), threading.Event()
+    jobs = threading.Thread(target=background_jobs,
+                            args=(api, database, bot.admin, bot.username, stop, wake, bot.order_locks),
+                            name="shop-jobs", daemon=True)
+    jobs.start()
     offset = store.get("offset", 0)
-    while True:
-        try:
-            updates = api.call("getUpdates", offset=offset, timeout=3, allowed_updates=UPDATES, limit=100)
-            # Answer pre-checkout queries before processing less time-sensitive work in the batch.
-            for update in updates:
-                if "pre_checkout_query" in update:
-                    bot.update(update)
-            for update in updates:
-                if "pre_checkout_query" not in update:
-                    bot.update(update)
-                offset = update["update_id"] + 1
-                with store.db:
-                    store.put("offset", offset)
-            with store.db:
-                store.expired()
-            for _ in range(3):
-                worker.next()
-        except TelegramError as error:
-            if error.code == 409:
-                LOG.error("Telegram returned 409. Stop other instances and remove an existing webhook before polling.")
-                return 2
-            LOG.warning("Telegram temporarily unavailable (%s)", error.code)
-            time.sleep(min(60, error.retry_after or 3))
+    try:
+        while True:
+            try:
+                updates = api.call("getUpdates", offset=offset, timeout=25, allowed_updates=UPDATES, limit=100)
+                # Telegram returns long polls immediately when an update arrives.
+                for update in updates:
+                    if "pre_checkout_query" in update:
+                        bot.update(update)
+                for update in updates:
+                    started = time.perf_counter()
+                    if "pre_checkout_query" not in update:
+                        bot.update(update)
+                    offset = update["update_id"] + 1
+                    with store.db:
+                        store.put("offset", offset)
+                    wake.set()
+                    elapsed = time.perf_counter() - started
+                    if elapsed >= 1:
+                        LOG.info("Update %s handled in %.2fs", update["update_id"], elapsed)
+            except TelegramError as error:
+                if error.code == 409:
+                    LOG.error("Telegram returned 409. Stop other instances and remove an existing webhook before polling.")
+                    return 2
+                LOG.warning("Telegram temporarily unavailable (%s)", error.code)
+                time.sleep(min(60, error.retry_after or 3))
+    finally:
+        stop.set()
+        wake.set()
+        jobs.join(timeout=12)
+
 
 
 def main():
@@ -195,6 +241,7 @@ def main():
         LOG.error("Unable to start bot. Telegram API returned %s.", error.code)
         return 1
     finally:
+        api.close()
         store.db.close()
 
 

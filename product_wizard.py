@@ -6,6 +6,7 @@ from secrets import token_hex
 
 from copybook import rub
 from store import ShopError, KOPECKS_PER_STAR
+from titles import read_title, title_html
 
 FIELDS = {
     "category": "Категория", "title": "Название", "description": "Описание",
@@ -15,8 +16,8 @@ FIELDS = {
 MODES = {"manual": "Вручную", "text": "Текст или ссылка", "invite": "Доступ в канал / чат"}
 PROMPTS = {
     "category": "Выберите категорию кнопкой. Вводить ID не нужно.",
-    "catname": "Отправьте название новой категории (до 70 символов). Она создастся скрытой.",
-    "title": "Отправьте название товара (до 70 символов).",
+    "catname": "Отправьте название новой категории (до 70 символов). Можно добавить премиум-эмодзи. Категория сразу появится в каталоге.",
+    "title": "Отправьте название товара (до 70 символов). Можно добавить премиум-эмодзи прямо в название.",
     "description": "Отправьте описание товара (до 255 символов).",
     "price": "Отправьте цену за одну штуку в Stars — целое число от 1 до 1 000 000.",
     "rub_price": "Отправьте цену за одну штуку в рублях, например 1,32. Или выберите автоматический расчёт.",
@@ -39,7 +40,7 @@ class ProductWizard:
             if not row:
                 raise ShopError("unavailable")
             draft.update(data={key: row[key] for key in FIELDS}, step="review",
-                         revision=row["revision"], original_stock=row["stock"], active=row["active"])
+                         revision=row["revision"], original_stock=row["stock"], active=row["active"], title_entities=row["title_entities"])
         self.product_show(draft)
 
     def product_load(self, token, step):
@@ -60,11 +61,12 @@ class ProductWizard:
         button = self.design_button
         rows = []
         if step == "review":
-            cat = self.s.one("SELECT title,active FROM categories WHERE id=?", data["category"])
-            category = cat["title"] if cat else "Категория удалена"
+            cat = self.s.one("SELECT * FROM categories WHERE id=?", data["category"])
+            category = title_html(cat) if cat else "Категория удалена"
             price = data["rub_price"] if data["rub_price"] is not None else data["price"] * KOPECKS_PER_STAR
-            text = (f"<b>Проверьте товар</b>\n{escape(data['title'])}\n{escape(data['description'])}\n\n"
-                    f"Категория: {escape(category)}\nЦена: {data['price']} ⭐ / {rub(price)} по СБП\n"
+            name = title_html({"title": data["title"], "title_entities": draft.get("title_entities", "[]")})
+            text = (f"<b>Проверьте товар</b>\n{name}\n{escape(data['description'])}\n\n"
+                    f"Категория: {category}\nЦена: {data['price']} ⭐ / {rub(price)} по СБП\n"
                     f"Количество: {data['stock']}\nВыдача: {MODES[data['mode']]}\n"
                     f"Фото: {'есть' if data.get('photo') else 'нет'}")
             if data["mode"] != "manual":
@@ -74,7 +76,7 @@ class ProductWizard:
             if draft["product"]:
                 rows.append([button("Сохранить изменения", f"{base}:save", "success")])
             else:
-                rows.append([button("Опубликовать", f"{base}:publish", "success"),
+                rows.append([button("Опубликовать товар и категорию" if cat and not cat["active"] else "Опубликовать", f"{base}:publish", "success"),
                              button("Сохранить скрытым", f"{base}:save")])
             edits = [button(label, f"{base}:field_{key}") for key, label in FIELDS.items()
                      if key != "target" or data["mode"] != "manual"]
@@ -86,7 +88,7 @@ class ProductWizard:
             if step == "category":
                 cats = self.s.all("SELECT * FROM categories ORDER BY id LIMIT 9 OFFSET ?", page * 8)
                 for cat in cats[:8]:
-                    rows.append([button(cat["title"], f"{base}:cat_{cat['id']}")])
+                    rows.append([self.copy.named_button(self.admin, "category_entry", f"{base}:cat_{cat['id']}", cat)])
                 nav = []
                 if page:
                     nav.append(button("‹ Предыдущие", f"{base}:page_{page - 1}"))
@@ -109,13 +111,18 @@ class ProductWizard:
                 value = data[step]
                 current = MODES.get(value, value) if step == "mode" else value
                 if step == "category":
-                    cat = self.s.one("SELECT title FROM categories WHERE id=?", value)
+                    cat = self.s.one("SELECT * FROM categories WHERE id=?", value)
                     current = cat["title"] if cat else "Удалена"
                 elif step == "rub_price":
                     current = "Автоматический расчёт" if value is None else rub(value)
                 elif step == "photo":
                     current = "Фото добавлено" if value else "Без фото"
-                text += "\n\nСейчас: " + escape(str(current)[:400])
+                rendered = escape(str(current)[:400])
+                if step == "title":
+                    rendered = title_html({"title": data["title"], "title_entities": draft.get("title_entities", "[]")})
+                elif step == "category" and cat:
+                    rendered = title_html(cat)
+                text += "\n\nСейчас: " + rendered
                 rows.append([button("Оставить как есть", f"{base}:keep")])
             if step != "category" or draft.get("editing"):
                 rows.append([button("‹ Назад", f"{base}:back")])
@@ -163,6 +170,7 @@ class ProductWizard:
                 if backup:
                     draft["data"] = backup["data"]
                     draft["stock_changed"] = backup["stock_changed"]
+                    draft["title_entities"] = backup.get("title_entities", "[]")
                 draft["step"] = "review"
             elif step == "catname":
                 draft["step"] = "category"
@@ -177,7 +185,8 @@ class ProductWizard:
                 if field == "target" and data["mode"] == "manual":
                     raise ShopError("invalid")
                 draft.update(step=field, editing=True,
-                             edit_backup={"data": dict(data), "stock_changed": draft.get("stock_changed", False)})
+                             edit_backup={"data": dict(data), "stock_changed": draft.get("stock_changed", False),
+                                          "title_entities": draft.get("title_entities", "[]")})
                 self.product_show(draft)
             elif action in {"save", "publish"}:
                 self.product_save(draft, publish=action == "publish")
@@ -225,11 +234,15 @@ class ProductWizard:
                 error = f"Отправьте текст длиной от 1 до {limit} символов."
             elif step == "catname":
                 with self.s.db:
-                    cursor = self.s.run("INSERT INTO categories(title) VALUES(?)", body)
+                    name, entities = read_title(msg)
+                    cursor = self.s.run("INSERT INTO categories(title,title_entities,active) VALUES(?,?,1)", name, entities)
                     data["category"] = cursor.lastrowid
                 draft["step"] = "category"
             else:
-                data[step] = body
+                if step == "title":
+                    data[step], draft["title_entities"] = read_title(msg)
+                else:
+                    data[step] = body
         elif step in {"price", "stock"}:
             least, most = (1, 10**6) if step == "price" else (0, 10**9)
             if not re.fullmatch(r"[0-9]{1,10}", body) or not least <= int(body) <= most:
@@ -293,12 +306,14 @@ class ProductWizard:
                 if not draft.get("stock_changed"):
                     data["stock"] = row["stock"]
                 self.s.run("""UPDATE products SET category=?,title=?,description=?,price=?,rub_price=?,stock=?,
-                              mode=?,target=?,photo=?,revision=revision+1 WHERE id=?""",
-                           *(data[key] for key in FIELDS), product)
+                              mode=?,target=?,photo=?,title_entities=?,revision=revision+1 WHERE id=?""",
+                           *(data[key] for key in FIELDS), draft.get("title_entities", "[]"), product)
             else:
-                cursor = self.s.run("""INSERT INTO products(category,title,description,price,rub_price,stock,mode,target,photo,active)
-                                       VALUES(?,?,?,?,?,?,?,?,?,?)""", *(data[key] for key in FIELDS), int(publish))
+                cursor = self.s.run("""INSERT INTO products(category,title,description,price,rub_price,stock,mode,target,photo,active,title_entities)
+                                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""", *(data[key] for key in FIELDS), int(publish), draft.get("title_entities", "[]"))
                 product = cursor.lastrowid
+                if publish:
+                    self.s.run("UPDATE categories SET active=1 WHERE id=?", data["category"])
             self.s.run("DELETE FROM settings WHERE key=?", self.product_draft_key)
             self.s.state(self.admin)
         self.ad_card("product", product)

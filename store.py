@@ -91,6 +91,10 @@ class Store:
             products = {row["name"] for row in self.all("PRAGMA table_info(products)")}
             if "rub_price" not in products:
                 self.run("ALTER TABLE products ADD COLUMN rub_price INTEGER")
+            for table in ("categories", "products", "orders"):
+                names = {row["name"] for row in self.all(f"PRAGMA table_info({table})")}
+                if "title_entities" not in names:
+                    self.run(f"ALTER TABLE {table} ADD COLUMN title_entities TEXT NOT NULL DEFAULT '[]'")
             self.run("CREATE UNIQUE INDEX IF NOT EXISTS orders_receipt ON orders(receipt_unique) WHERE receipt_unique IS NOT NULL")
 
     def one(self, sql, *args):
@@ -184,11 +188,11 @@ class Store:
         unit, total, main, referral = self.checkout_price(user, item, qty, method, use_credit)
         cursor = self.run(
             """INSERT INTO orders(payload,user,product,title,description,qty,unit,total,credit,referral_credit,
-                                   mode,target,revision,started,invite_name,method)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   mode,target,revision,started,invite_name,method,title_entities)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             token_urlsafe(24), user, product, item["title"], item["description"], qty, unit,
             total, main, referral, item["mode"], item["target"], item["revision"],
-            int(time.time()), uuid4().hex, method,
+            int(time.time()), uuid4().hex, method, item["title_entities"],
         )
         return self.order(cursor.lastrowid)
 

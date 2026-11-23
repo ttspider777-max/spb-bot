@@ -2,12 +2,14 @@ import json
 import logging
 import re
 import time
+import threading
 from html import unescape
 
 from admin import Admin
 from copybook import Copybook, rub
 from store import KOPECKS_PER_STAR, REFERRAL_CREDIT, ShopError
 from telegram import TelegramError
+from titles import title_html
 
 LOG = logging.getLogger("shop")
 REVIEWS = "https://t.me/heliysrep/18"
@@ -17,12 +19,17 @@ SBP_BANK = "Т‑Банк"
 
 
 class Bot(Admin):
-    def __init__(self, api, store, admin):
+    def __init__(self, api, store, admin, order_locks=None):
         self.api = api
         self.s = store
         self.admin = admin
         self.copy = Copybook(store)
         self.username = None
+        self._subscription_cache = {}
+        self.order_locks = order_locks if order_locks is not None else [threading.RLock() for _ in range(128)]
+
+    def order_lock(self, order):
+        return self.order_locks[int(order) % len(self.order_locks)]
 
     def b(self, user, key, action=None, **options):
         return self.copy.button(user, key, action, **options)
@@ -68,13 +75,19 @@ class Bot(Admin):
     def say(self, user, key, rows=(), back=None, photo=None, home=True, **values):
         return self.send(user, self.t(user, key, **values), rows, back, photo, home)
 
-    def gate(self, user):
+    def gate(self, user, force=False):
         if user == self.admin:
             return True
         if self.s.one("SELECT blocked FROM users WHERE id=?", user)["blocked"]:
             self.say(user, "banned", [[self.b(user, "support", "support")]], home=False)
             return False
         rules = self.s.all("SELECT * FROM subscriptions ORDER BY chat")
+        signature = tuple((r["chat"], r["url"]) for r in rules)
+        cached = self._subscription_cache.get(user)
+        now = time.monotonic()
+        if not force and cached and cached[0] == signature and cached[1] > now:
+            return True
+        self._subscription_cache.pop(user, None)
         missing = []
         try:
             for rule in rules:
@@ -92,6 +105,10 @@ class Bot(Admin):
                     for i, rule in enumerate(missing, 1)]
             rows += [[self.b(user, "subscribe", "home")], [self.b(user, "support", "support")]]
             self.say(user, "subscription", rows, home=False)
+        if not missing and rules:
+            if len(self._subscription_cache) >= 2048:
+                self._subscription_cache.clear()
+            self._subscription_cache[user] = (signature, now + 15)
         return not missing
 
     def home(self, user):
@@ -106,7 +123,7 @@ class Bot(Admin):
         size = 12
         if section is None:
             rows = self.s.all("SELECT * FROM categories WHERE active=1 ORDER BY id LIMIT ? OFFSET ?", size + 1, page * size)
-            buttons = [[self.b(user, "category_entry", f"cat:{r['id']}:0", label=r["title"])] for r in rows[:size]]
+            buttons = [[self.copy.named_button(user, "category_entry", f"cat:{r['id']}:0", r)] for r in rows[:size]]
             self.pages(user, buttons, "catalog", page, len(rows) > size)
             self.say(user, "catalog" if rows else "empty", buttons)
             return
@@ -117,10 +134,10 @@ class Bot(Admin):
             "SELECT * FROM products WHERE category=? AND active=1 ORDER BY id LIMIT ? OFFSET ?",
             section, size + 1, page * size,
         )
-        buttons = [[self.b(user, "product_entry", f"item:{r['id']}", label=f"{r['title']} · {rub(self.s.unit_price(r, 'sbp'))}")]
+        buttons = [[self.copy.named_button(user, "product_entry", f"item:{r['id']}", r, suffix=f" · {rub(self.s.unit_price(r, 'sbp'))}")]
                    for r in rows[:size]]
         self.pages(user, buttons, f"cat:{section}", page, len(rows) > size)
-        self.say(user, "category" if rows else "empty", buttons, "catalog", title=category["title"])
+        self.say(user, "category" if rows else "empty", buttons, "catalog", title=title_html(category))
 
     def pages(self, user, rows, prefix, page, more):
         controls = []
@@ -141,7 +158,7 @@ class Bot(Admin):
         item = self.item(product)
         rows = [[self.b(user, "buy", f"qty:{product}", style="primary")]] if item["stock"] else []
         self.say(user, "product", rows, f"cat:{item['category']}:0", photo=item["photo"],
-                 title=item["title"], description=item["description"], price=item["price"],
+                 title=title_html(item), description=item["description"], price=item["price"],
                  rubles=rub(self.s.unit_price(item, "sbp")), stock=item["stock"])
 
     def quantity(self, user, product):
@@ -176,7 +193,7 @@ class Bot(Admin):
                 rows.append([self.b(user, "discount", f"buy:{product}:{qty}:1", style="success", amount=gross - discount)])
         if not rows:
             raise ShopError("amount_range")
-        self.say(user, "quote", rows, f"item:{product}", title=item["title"], qty=qty, gross=gross, discount=discount)
+        self.say(user, "quote", rows, f"item:{product}", title=title_html(item), qty=qty, gross=gross, discount=discount)
 
     def sbp_details(self, user, row):
         number = row["id"]
@@ -227,7 +244,7 @@ class Bot(Admin):
         rows = self.s.all(
             f"SELECT * FROM orders WHERE user=? {where} ORDER BY id DESC LIMIT 13 OFFSET ?", user, page * 12,
         )
-        buttons = [[self.b(user, "order_entry", f"order:{r['id']}", label=f"№{r['id']} · {r['title']}")] for r in rows[:12]]
+        buttons = [[self.copy.named_button(user, "order_entry", f"order:{r['id']}", r, prefix=f"№{r['id']} · ")] for r in rows[:12]]
         self.pages(user, buttons, "pending" if pending else "purchases", page, len(rows) > 12)
         key = ("pending" if pending else "orders") if rows else "empty"
         self.say(user, key, buttons, "profile")
@@ -249,7 +266,7 @@ class Bot(Admin):
             buttons.append([self.b(user, "support", "support")])
         status = self.t(user, "sbp_status_review" if is_sbp and row["status"] == "review" else f"status_{row['status']}")
         self.say(user, "sbp_order" if is_sbp else "order", buttons, "pending" if pending else "purchases",
-                 id=number, title=row["title"], qty=row["qty"],
+                 id=number, title=title_html(row), qty=row["qty"],
                  total=rub(row["total"]) if is_sbp else row["total"], status=unescape(status))
         if row["status"] == "delivered":
             self.show_delivery(row)
@@ -315,7 +332,11 @@ class Bot(Admin):
         key, *args = action.split(":")
         if key == "a":
             if user == self.admin:
-                self.admin_route(args)
+                if args and args[0] in {"approve", "reject", "refund_auto", "retry"}:
+                    with self.order_lock(args[1]):
+                        self.admin_route(args)
+                else:
+                    self.admin_route(args)
             return
         if key == "receipt":
             order = int(args[0])
@@ -339,7 +360,7 @@ class Bot(Admin):
                     self.s.state(user, "ticket", ticket)
                 self.say(user, "ticket_prompt", back="support")
             return
-        if not self.gate(user):
+        if not self.gate(user, force=key in {"home", "buy", "buy_sbp", "invoice"}):
             return
         if key == "home":
             self.home(user)
@@ -451,7 +472,11 @@ class Bot(Admin):
         elif key == "receipt":
             self.receipt_message(user, args[0], msg)
         elif key.startswith("a:") and user == self.admin:
-            self.admin_input(key[2:], args, msg)
+            if key in {"a:approve", "a:reject", "a:reject_sbp"}:
+                with self.order_lock(args[0]):
+                    self.admin_input(key[2:], args, msg)
+            else:
+                self.admin_input(key[2:], args, msg)
         elif self.gate(user):
             if key == "quantity":
                 if not re.fullmatch(r"[0-9]{1,5}", raw):
@@ -465,16 +490,22 @@ class Bot(Admin):
                     self.s.state(user)
                 self.say(user, "promo_done", back="profile", amount=rub(amount))
 
+    def acknowledge_callback(self, query_id):
+        if hasattr(self.api, "answer_callback"):
+            self.api.answer_callback(query_id)
+        else:
+            try:
+                self.api.call("answerCallbackQuery", callback_query_id=query_id)
+            except TelegramError:
+                pass
+
     def callback(self, callback):
         message = callback.get("message", {})
         if message.get("chat", {}).get("type") != "private":
-            self.api.call("answerCallbackQuery", callback_query_id=callback["id"])
+            self.acknowledge_callback(callback["id"])
             return
         user = callback["from"]["id"]
-        try:
-            self.api.call("answerCallbackQuery", callback_query_id=callback["id"])
-        except TelegramError:
-            pass
+        self.acknowledge_callback(callback["id"])
         action = callback.get("data", "")
         with self.s.db:
             self.s.touch(callback["from"])
